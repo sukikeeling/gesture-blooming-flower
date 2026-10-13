@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>指尖生花 · 手势控制粒子花朵绽放 (Gesture Blooming Flower)</title>
+  <link rel="stylesheet" href="./style.css" />
+
+  <!-- MediaPipe Hands & Camera Utils CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <!-- 主视口容器 -->
+  <div id="app-container">
+    <!-- 隐藏或背景视频流 (MediaPipe 输入源) -->
+    <video id="webcam" playsinline autoplay muted></video>
+
+    <!-- 摄像头半透明背景渲染画布 (镜像翻转) -->
+    <canvas id="camera-canvas"></canvas>
+
+    <!-- 手部 21 关键点骨骼调试连线画布 -->
+    <canvas id="skeleton-canvas"></canvas>
+
+    <!-- Three.js 3D WebGL 渲染画布 -->
+    <canvas id="webgl-canvas"></canvas>
+
+    <!-- 顶部状态栏与交互仪表盘 -->
+    <header class="hud-header">
+      <div class="hud-brand">
+        <span class="hud-icon">🌸</span>
+        <div class="hud-titles">
+          <h1>指尖生花 · 粒子交互艺术</h1>
+          <p class="subtitle">MediaPipe Hands × Three.js GLSL Particles</p>
+        </div>
+      </div>
+
+      <!-- 手势张开度实时张力条 -->
+      <div class="tension-panel">
+        <div class="tension-label-row">
+          <span>手势张开度 Tension</span>
+          <span id="tension-value" class="tension-val">0.00</span>
+        </div>
+        <div class="tension-meter-wrapper">
+          <div class="threshold-line line-low" title="闭合阈值 0.32" style="left: 32%;"></div>
+          <div class="threshold-line line-high" title="盛开阈值 0.66" style="left: 66%;"></div>
+          <div id="tension-fill" class="tension-fill"></div>
+        </div>
+        <div class="state-pill" id="flower-state-pill">
+          <span class="state-dot"></span>
+          <span id="flower-state-text">等待手势识别...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- 快捷悬浮控制台 -->
+    <aside class="control-panel glass-panel">
+      <button id="toggle-panel-btn" class="toggle-btn" title="收起/展开控制面板">⚙️ 控制选项</button>
+      <div id="panel-body" class="panel-body">
+        <div class="control-group">
+          <label>追踪锚点：</label>
+          <div class="btn-group">
+            <button class="opt-btn active" data-target="index_tip">食指指尖 (Index Tip)</button>
+            <button class="opt-btn" data-target="palm">手掌中心 (Palm)</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>花朵配色主题：</label>
+          <div class="btn-group color-group">
+            <button class="theme-btn active" data-theme="sakura" title="樱花粉紫">🌸 樱花</button>
+            <button class="theme-btn" data-theme="aurora" title="极光荧蓝">🌌 极光</button>
+            <button class="theme-btn" data-theme="sunflower" title="太阳火金">🌻 耀金</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>摄像头背景不透明度：<span id="video-opacity-val">25%</span></label>
+          <input type="range" id="video-opacity" min="0" max="100" value="25" />
+        </div>
+
+        <div class="control-group">
+          <label>性能预设 (粒子数)：</label>
+          <div class="btn-group">
+            <button class="count-btn" data-count="4000">流畅 (4k)</button>
+            <button class="count-btn active" data-count="8000">平衡 (8k)</button>
+            <button class="count-btn" data-count="15000">极致 (15k)</button>
+          </div>
+        </div>
+
+        <div class="control-group switch-group">
+          <label for="show-skeleton">显示手部关键点连线：</label>
+          <input type="checkbox" id="show-skeleton" checked />
+        </div>
+
+        <div class="control-group switch-group">
+          <label for="auto-rotate">花朵自转微动：</label>
+          <input type="checkbox" id="auto-rotate" checked />
+        </div>
+
+        <div class="control-stats">
+          <div>渲染帧率: <span id="render-fps-stat" style="color: #4cc9f0; font-weight:bold;">60</span> FPS</div>
+          <div>手势识别: <span id="vision-fps-stat" style="color: #ffd166;">--</span> FPS</div>
+          <div>粒子数量: <span id="particle-count-stat">8,000</span></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 引导手势提示浮层 -->
+    <div id="hint-overlay" class="hint-overlay">
+      <div class="gesture-hints">
+        <div class="hint-item">
+          <span class="hint-emoji">✊</span>
+          <span>握拳：花苞聚拢闭合 (Tension &lt; 0.32)</span>
+        </div>
+        <div class="hint-arrow">➔</div>
+        <div class="hint-item">
+          <span class="hint-emoji">🖐️</span>
+          <span>张开手掌：花朵在指尖盛开 (Tension &gt; 0.66)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 摄像头错误/权限提示弹窗 -->
+    <div id="modal-container" class="modal-container hidden">
+      <div class="modal-box glass-panel">
+        <div class="modal-icon">📷</div>
+        <h2 id="modal-title">需要摄像头权限</h2>
+        <p id="modal-message">
+          本页面通过本地摄像头实时识别人手 21 个关键点，所有图像计算均在您的浏览器本地进行，绝不上传任何数据。
+        </p>
+        <button id="modal-action-btn" class="modal-btn">重新请求授权</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 主业务逻辑 (ES Module) -->
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
