@@ -1,13 +1,16 @@
-/* 全局重置与基础变量 */
+/* ============================================================================
+   指尖花开 · MediaPipe Hands × Three.js WebGL 极奢玻璃拟物交互样式表
+   ============================================================================ */
+
 :root {
-  --bg-dark: #0a0c14;
-  --panel-bg: rgba(18, 22, 38, 0.72);
+  --bg-dark: #0a0c16;
+  --panel-bg: rgba(15, 20, 36, 0.72);
   --panel-border: rgba(255, 255, 255, 0.12);
   --accent-pink: #ff5f9e;
   --accent-purple: #9d4edd;
-  --accent-cyan: #4cc9f0;
+  --accent-cyan: #00f5d4;
   --accent-gold: #ffd166;
-  --text-main: #f0f3fc;
+  --text-main: #f8fafc;
   --text-dim: #94a3b8;
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
 }
@@ -21,8 +24,8 @@
 }
 
 html, body {
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100vh;
   overflow: hidden;
   background-color: var(--bg-dark);
   font-family: var(--font-family);
@@ -30,136 +33,153 @@ html, body {
   user-select: none;
 }
 
-/* 主视口容器 */
-#app-container {
-  position: relative;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-}
+/* ----------------------------------------------------------------------------
+   1. 画布与底层视频层级管理
+   ---------------------------------------------------------------------------- */
 
-/* 摄像头直接通过视频硬件解码渲染背景 (CSS 硬件加速镜像翻转) */
-#webcam {
-  display: block;
+/* 摄像头视频与手部骨骼 Canvas 容器 */
+#camera-container {
   position: absolute;
-  top: 0;
-  left: 0;
+  inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  transform: scaleX(-1);
-  opacity: 0.25;
+  overflow: hidden;
   z-index: 1;
   pointer-events: none;
-  transition: opacity 0.2s ease;
 }
 
-#camera-canvas {
-  display: none;
-}
-
-/* 骨骼图层与 WebGL 画布 */
-#skeleton-canvas,
-#webgl-canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
+#webcam-video {
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
+  transform: scaleX(-1); /* 镜像翻转符合自拍直觉 */
+  opacity: 0.35;
   transition: opacity 0.2s ease;
-  pointer-events: none;
 }
 
-#skeleton-canvas {
+#landmark-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1); /* 骨骼同步镜像 */
   z-index: 2;
   pointer-events: none;
 }
 
-#webgl-canvas {
+/* Three.js 3D 粒子渲染层 */
+#webgl-container {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   z-index: 3;
   pointer-events: auto;
 }
 
-/* 毛玻璃质感组件通用样式 */
+#webgl-container canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+/* ----------------------------------------------------------------------------
+   2. 毛玻璃质感组件与 HUD 仪表盘
+   ---------------------------------------------------------------------------- */
 .glass-panel {
   background: var(--panel-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
   border: 1px solid var(--panel-border);
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
-  border-radius: 16px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  border-radius: 18px;
 }
 
-/* 顶部 HUD 状态栏 */
-.hud-header {
+#hud-panel {
   position: absolute;
-  top: 20px;
-  left: 20px;
-  right: 20px;
+  top: 24px;
+  left: 24px;
   z-index: 10;
+  width: 340px;
+  padding: 22px 24px;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  pointer-events: none;
+  flex-direction: column;
   gap: 16px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
 }
 
-.hud-brand {
+/* 隐藏滚动条但保留滚动能力 */
+#hud-panel::-webkit-scrollbar {
+  width: 4px;
+}
+#hud-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+}
+
+.panel-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  background: var(--panel-bg);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  padding: 10px 18px;
-  border-radius: 14px;
-  border: 1px solid var(--panel-border);
-  pointer-events: auto;
+  gap: 10px;
 }
 
-.hud-icon {
-  font-size: 28px;
-  animation: pulse-flower 3s infinite ease-in-out;
-}
-
-@keyframes pulse-flower {
-  0%, 100% { transform: scale(1) rotate(0deg); }
-  50% { transform: scale(1.15) rotate(10deg); }
-}
-
-.hud-titles h1 {
-  font-size: 16px;
+.panel-title {
+  font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  background: linear-gradient(135deg, #fff 30%, var(--accent-pink));
+  background: linear-gradient(135deg, #ffffff 40%, var(--accent-pink));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-.hud-titles .subtitle {
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 2px;
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #64748b;
+  box-shadow: 0 0 6px rgba(100, 116, 139, 0.5);
+  transition: all 0.3s;
 }
 
-/* 手势张力 Tension 监控条 */
-.tension-panel {
-  min-width: 280px;
-  background: var(--panel-bg);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  padding: 12px 18px;
-  border-radius: 14px;
-  border: 1px solid var(--panel-border);
-  pointer-events: auto;
+.status-dot.ready {
+  background: var(--accent-cyan);
+  box-shadow: 0 0 10px var(--accent-cyan);
+}
+
+.status-dot.loading {
+  background: var(--accent-gold);
+  box-shadow: 0 0 10px var(--accent-gold);
+}
+
+.status-dot.error {
+  background: #ef4444;
+  box-shadow: 0 0 10px #ef4444;
+}
+
+.status-desc {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+/* ----------------------------------------------------------------------------
+   3. 进度条与指标组
+   ---------------------------------------------------------------------------- */
+.metrics-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.metric-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.tension-label-row {
+.metric-label {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
@@ -167,152 +187,130 @@ html, body {
   color: var(--text-dim);
 }
 
-.tension-val {
+.metric-label span:last-child {
   font-family: monospace;
-  font-size: 14px;
+  font-size: 13px;
   color: #fff;
 }
 
-.tension-meter-wrapper {
+.progress-bar {
   position: relative;
   width: 100%;
-  height: 10px;
+  height: 8px;
   background: rgba(255, 255, 255, 0.08);
   border-radius: 6px;
   overflow: hidden;
 }
 
-.tension-fill {
+.progress-fill {
   height: 100%;
   width: 0%;
-  background: linear-gradient(90deg, #4cc9f0 0%, #a06cd5 45%, #ff5f9e 85%, #ff9e00 100%);
+  background: linear-gradient(90deg, #4cc9f0, #ff5f9e);
   border-radius: 6px;
-  transition: width 0.05s linear;
+  transition: width 0.06s linear;
 }
 
-/* 阈值标记线 */
-.threshold-line {
+.progress-fill.spread-fill {
+  background: linear-gradient(90deg, #ff5f9e, #ffd166, #00f5d4);
+}
+
+.threshold-marker {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 2px;
   background: rgba(255, 255, 255, 0.4);
   z-index: 2;
-}
-
-.threshold-line.line-low {
   border-right: 1px dashed rgba(255, 255, 255, 0.8);
 }
-.threshold-line.line-high {
-  border-right: 1px dashed rgba(255, 95, 158, 0.8);
+
+/* 手势状态 Badge */
+.gesture-badge-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-/* 状态药丸状态指示 */
-.state-pill {
+.badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 2px;
-}
-
-.state-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #64748b;
-  transition: background 0.3s;
-}
-
-.state-pill.bud .state-dot { background: #4cc9f0; box-shadow: 0 0 8px #4cc9f0; }
-.state-pill.growing .state-dot { background: #ffd166; box-shadow: 0 0 8px #ffd166; }
-.state-pill.bloom .state-dot { background: #ff5f9e; box-shadow: 0 0 8px #ff5f9e; }
-
-/* 悬浮控制面板 */
-.control-panel {
-  position: absolute;
-  top: 90px;
-  right: 20px;
-  z-index: 10;
-  width: 280px;
-  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
-}
-
-.control-panel.collapsed .panel-body {
-  display: none;
-}
-
-.toggle-btn {
-  width: 100%;
-  background: transparent;
-  border: none;
-  color: var(--text-main);
-  padding: 10px 16px;
-  font-size: 13px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  font-size: 12px;
   font-weight: 600;
-  text-align: left;
-  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all 0.3s;
+}
+
+.badge.bud {
+  background: rgba(0, 245, 212, 0.15);
+  border-color: rgba(0, 245, 212, 0.35);
+  color: var(--accent-cyan);
+  box-shadow: 0 0 12px rgba(0, 245, 212, 0.25);
+}
+
+.badge.bloom {
+  background: rgba(255, 95, 158, 0.18);
+  border-color: rgba(255, 95, 158, 0.4);
+  color: var(--accent-pink);
+  box-shadow: 0 0 14px rgba(255, 95, 158, 0.35);
+}
+
+.badge.blooming {
+  background: rgba(255, 209, 102, 0.15);
+  border-color: rgba(255, 209, 102, 0.35);
+  color: var(--accent-gold);
+}
+
+/* ----------------------------------------------------------------------------
+   4. 参数调节控件
+   ---------------------------------------------------------------------------- */
+.controls-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.control-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.control-item label {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-}
-
-.panel-body {
-  padding: 0 16px 16px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.control-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.control-group label {
   font-size: 12px;
   color: var(--text-dim);
 }
 
-.control-group.switch-group {
-  flex-direction: row;
-  justify-content: space-between;
-  align-items: center;
+.control-item label span:last-child {
+  font-family: monospace;
+  color: #fff;
 }
 
-/* 按钮组 */
-.btn-group {
+.control-toggles {
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
 }
 
-.opt-btn, .theme-btn, .count-btn {
-  flex: 1;
-  padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: var(--text-main);
-  font-size: 11px;
-  border-radius: 8px;
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
   cursor: pointer;
-  transition: all 0.2s;
-  white-space: nowrap;
 }
 
-.opt-btn:hover, .theme-btn:hover, .count-btn:hover {
-  background: rgba(255, 255, 255, 0.14);
-}
-
-.opt-btn.active, .theme-btn.active, .count-btn.active {
-  background: linear-gradient(135deg, var(--accent-pink), var(--accent-purple));
-  border-color: rgba(255, 255, 255, 0.3);
-  box-shadow: 0 2px 10px rgba(255, 95, 158, 0.3);
-  font-weight: 600;
-}
-
-/* 滑动条美化 */
+/* 滑块样式 */
 input[type="range"] {
   -webkit-appearance: none;
   width: 100%;
@@ -330,9 +328,13 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--accent-pink);
   cursor: pointer;
   box-shadow: 0 0 8px rgba(255, 95, 158, 0.6);
+  transition: transform 0.15s;
 }
 
-/* 复选框美化 */
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
 input[type="checkbox"] {
   accent-color: var(--accent-pink);
   width: 16px;
@@ -340,163 +342,114 @@ input[type="checkbox"] {
   cursor: pointer;
 }
 
-.control-stats {
-  font-size: 11px;
-  color: var(--text-dim);
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  padding-top: 10px;
-  display: flex;
-  justify-content: space-between;
-}
-
-/* 底部操作引导条 */
-.hint-overlay {
-  position: absolute;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 10;
-  pointer-events: none;
-  animation: fade-pulse 4s infinite alternate ease-in-out;
-}
-
-@keyframes fade-pulse {
-  0% { opacity: 0.8; }
-  100% { opacity: 1; }
-}
-
-.gesture-hints {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  background: var(--panel-bg);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border: 1px solid var(--panel-border);
-  padding: 10px 22px;
-  border-radius: 40px;
-  font-size: 13px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
-}
-
-.hint-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.hint-emoji {
-  font-size: 18px;
-}
-
-.hint-arrow {
-  color: var(--accent-pink);
-  font-weight: bold;
-}
-
-/* 模态框 / 权限引导 */
-.modal-container {
+/* ----------------------------------------------------------------------------
+   5. 摄像头异常与模拟模式弹窗
+   ---------------------------------------------------------------------------- */
+.modal {
   position: absolute;
   inset: 0;
   z-index: 100;
-  background: rgba(10, 12, 20, 0.85);
-  backdrop-filter: blur(8px);
+  background: rgba(10, 12, 22, 0.85);
+  backdrop-filter: blur(10px);
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 20px;
+  padding: 24px;
   transition: opacity 0.3s;
 }
 
-.modal-container.hidden {
+.modal.hidden {
   opacity: 0;
   pointer-events: none;
   display: none;
 }
 
-.modal-box {
-  max-width: 420px;
+.modal-content {
+  max-width: 440px;
   padding: 32px 28px;
-  text-align: center;
   display: flex;
   flex-direction: column;
-  align-items: center;
   gap: 16px;
 }
 
-.modal-icon {
-  font-size: 48px;
-}
-
-.modal-box h2 {
-  font-size: 20px;
+.modal-content h2 {
+  font-size: 18px;
   color: #fff;
 }
 
-.modal-box p {
+.modal-content p {
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-dim);
 }
 
-.modal-btn {
-  margin-top: 8px;
-  padding: 12px 28px;
-  background: linear-gradient(135deg, var(--accent-pink), var(--accent-purple));
-  border: none;
-  border-radius: 24px;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: 0 4px 16px rgba(255, 95, 158, 0.4);
-  transition: transform 0.2s, box-shadow 0.2s;
+.error-tips {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding-left: 18px;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.modal-btn:hover {
-  transform: scale(1.04);
+.error-tips code {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #fff;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.btn {
+  flex: 1;
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s;
+  text-align: center;
+}
+
+.primary-btn {
+  background: linear-gradient(135deg, var(--accent-pink), var(--accent-purple));
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(255, 95, 158, 0.4);
+}
+
+.primary-btn:hover {
+  transform: translateY(-1px);
   box-shadow: 0 6px 20px rgba(255, 95, 158, 0.6);
 }
 
-/* 移动端与小屏适配 */
+.secondary-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-main);
+}
+
+.secondary-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* 移动端适配 */
 @media (max-width: 768px) {
-  .hud-header {
-    flex-direction: column;
-    align-items: stretch;
+  #hud-panel {
     top: 12px;
     left: 12px;
     right: 12px;
-    gap: 8px;
-  }
-  
-  .hud-brand {
-    padding: 8px 12px;
-  }
-  
-  .tension-panel {
-    min-width: unset;
-    padding: 8px 12px;
-  }
-  
-  .control-panel {
-    top: auto;
-    bottom: 80px;
-    right: 12px;
-    left: 12px;
     width: auto;
-    max-height: 40vh;
-    overflow-y: auto;
-  }
-  
-  .hint-overlay {
-    bottom: 12px;
-    width: calc(100% - 24px);
-  }
-  
-  .gesture-hints {
-    font-size: 11px;
-    padding: 8px 14px;
-    justify-content: center;
-    gap: 8px;
+    padding: 16px;
   }
 }
