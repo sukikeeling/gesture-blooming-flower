@@ -3,138 +3,136 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>指尖生花 · 手势控制粒子花朵绽放 (Gesture Blooming Flower)</title>
+  <title>指尖花开 | Three.js + MediaPipe 手势粒子交互</title>
   <link rel="stylesheet" href="./style.css" />
 
-  <!-- MediaPipe Hands & Camera Utils CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <!-- MediaPipe Hands 与绘图工具库 (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+
+  <!-- Three.js ES Module Import Map -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+      }
+    }
+  </script>
 </head>
 <body>
-  <!-- 主视口容器 -->
-  <div id="app-container">
-    <!-- 隐藏或背景视频流 (MediaPipe 输入源) -->
-    <video id="webcam" playsinline autoplay muted></video>
+  <!-- 底层：摄像头视频画面与手部骨骼 Canvas 叠加层 -->
+  <div id="camera-container">
+    <video id="webcam-video" playsinline muted></video>
+    <canvas id="landmark-canvas"></canvas>
+  </div>
 
-    <!-- 摄像头半透明背景渲染画布 (镜像翻转) -->
-    <canvas id="camera-canvas"></canvas>
+  <!-- 中层：Three.js 3D 粒子渲染容器 -->
+  <div id="webgl-container"></div>
 
-    <!-- 手部 21 关键点骨骼调试连线画布 -->
-    <canvas id="skeleton-canvas"></canvas>
+  <!-- 顶层：左上角状态与数据监控面板 -->
+  <div id="hud-panel" class="glass-panel">
+    <div class="panel-header">
+      <span class="status-dot" id="status-dot"></span>
+      <h1 class="panel-title">指尖花开 · 实时粒子交互</h1>
+    </div>
+    <p id="status-text" class="status-desc">正在初始化摄像头与 AI 手势模型...</p>
 
-    <!-- Three.js 3D WebGL 渲染画布 -->
-    <canvas id="webgl-canvas"></canvas>
-
-    <!-- 顶部状态栏与交互仪表盘 -->
-    <header class="hud-header">
-      <div class="hud-brand">
-        <span class="hud-icon">🌸</span>
-        <div class="hud-titles">
-          <h1>指尖生花 · 粒子交互艺术</h1>
-          <p class="subtitle">MediaPipe Hands × Three.js GLSL Particles</p>
+    <!-- 实时张开度与绽放度进度条 -->
+    <div class="metrics-group">
+      <div class="metric-row">
+        <div class="metric-label">
+          <span>手掌张开度 (Tension)</span>
+          <span id="tension-value">0.00</span>
+        </div>
+        <div class="progress-bar">
+          <!-- 0.32 与 0.66 阈值刻度线 -->
+          <div class="threshold-marker" style="left: 32%;" title="闭合阈值 0.32"></div>
+          <div class="threshold-marker" style="left: 66%;" title="绽放阈值 0.66"></div>
+          <div class="progress-fill" id="tension-bar"></div>
         </div>
       </div>
 
-      <!-- 手势张开度实时张力条 -->
-      <div class="tension-panel">
-        <div class="tension-label-row">
-          <span>手势张开度 Tension</span>
-          <span id="tension-value" class="tension-val">0.00</span>
+      <div class="metric-row">
+        <div class="metric-label">
+          <span>花朵绽放度 (Spread)</span>
+          <span id="spread-value">0.00</span>
         </div>
-        <div class="tension-meter-wrapper">
-          <div class="threshold-line line-low" title="闭合阈值 0.32" style="left: 32%;"></div>
-          <div class="threshold-line line-high" title="盛开阈值 0.66" style="left: 66%;"></div>
-          <div id="tension-fill" class="tension-fill"></div>
-        </div>
-        <div class="state-pill" id="flower-state-pill">
-          <span class="state-dot"></span>
-          <span id="flower-state-text">等待手势识别...</span>
+        <div class="progress-bar">
+          <div class="progress-fill spread-fill" id="spread-bar"></div>
         </div>
       </div>
-    </header>
 
-    <!-- 快捷悬浮控制台 -->
-    <aside class="control-panel glass-panel">
-      <button id="toggle-panel-btn" class="toggle-btn" title="收起/展开控制面板">⚙️ 控制选项</button>
-      <div id="panel-body" class="panel-body">
-        <div class="control-group">
-          <label>追踪锚点：</label>
-          <div class="btn-group">
-            <button class="opt-btn active" data-target="index_tip">食指指尖 (Index Tip)</button>
-            <button class="opt-btn" data-target="palm">手掌中心 (Palm)</button>
-          </div>
-        </div>
-
-        <div class="control-group">
-          <label>花朵配色主题：</label>
-          <div class="btn-group color-group">
-            <button class="theme-btn active" data-theme="sakura" title="樱花粉紫">🌸 樱花</button>
-            <button class="theme-btn" data-theme="aurora" title="极光荧蓝">🌌 极光</button>
-            <button class="theme-btn" data-theme="sunflower" title="太阳火金">🌻 耀金</button>
-          </div>
-        </div>
-
-        <div class="control-group">
-          <label>摄像头背景不透明度：<span id="video-opacity-val">25%</span></label>
-          <input type="range" id="video-opacity" min="0" max="100" value="25" />
-        </div>
-
-        <div class="control-group">
-          <label>性能预设 (粒子数)：</label>
-          <div class="btn-group">
-            <button class="count-btn" data-count="4000">流畅 (4k)</button>
-            <button class="count-btn active" data-count="8000">平衡 (8k)</button>
-            <button class="count-btn" data-count="15000">极致 (15k)</button>
-          </div>
-        </div>
-
-        <div class="control-group switch-group">
-          <label for="show-skeleton">显示手部关键点连线：</label>
-          <input type="checkbox" id="show-skeleton" checked />
-        </div>
-
-        <div class="control-group switch-group">
-          <label for="auto-rotate">花朵自转微动：</label>
-          <input type="checkbox" id="auto-rotate" checked />
-        </div>
-
-        <div class="control-stats">
-          <div>渲染帧率: <span id="render-fps-stat" style="color: #4cc9f0; font-weight:bold;">60</span> FPS</div>
-          <div>手势识别: <span id="vision-fps-stat" style="color: #ffd166;">--</span> FPS</div>
-          <div>粒子数量: <span id="particle-count-stat">8,000</span></div>
-        </div>
-      </div>
-    </aside>
-
-    <!-- 引导手势提示浮层 -->
-    <div id="hint-overlay" class="hint-overlay">
-      <div class="gesture-hints">
-        <div class="hint-item">
-          <span class="hint-emoji">✊</span>
-          <span>握拳：花苞聚拢闭合 (Tension &lt; 0.32)</span>
-        </div>
-        <div class="hint-arrow">➔</div>
-        <div class="hint-item">
-          <span class="hint-emoji">🖐️</span>
-          <span>张开手掌：花朵在指尖盛开 (Tension &gt; 0.66)</span>
-        </div>
+      <div class="gesture-badge-row">
+        <span>当前状态：</span>
+        <span id="gesture-state-badge" class="badge">等待手部入画</span>
       </div>
     </div>
 
-    <!-- 摄像头错误/权限提示弹窗 -->
-    <div id="modal-container" class="modal-container hidden">
-      <div class="modal-box glass-panel">
-        <div class="modal-icon">📷</div>
-        <h2 id="modal-title">需要摄像头权限</h2>
-        <p id="modal-message">
-          本页面通过本地摄像头实时识别人手 21 个关键点，所有图像计算均在您的浏览器本地进行，绝不上传任何数据。
-        </p>
-        <button id="modal-action-btn" class="modal-btn">重新请求授权</button>
+    <!-- 参数可调控制区 -->
+    <div class="controls-group">
+      <div class="control-item">
+        <label for="particle-count-slider">
+          <span>粒子数量</span>
+          <span id="particle-count-val">15000</span>
+        </label>
+        <input type="range" id="particle-count-slider" min="5000" max="20000" step="1000" value="15000" />
+      </div>
+
+      <div class="control-item">
+        <label for="petal-count-slider">
+          <span>花瓣数量 (极坐标阶数)</span>
+          <span id="petal-count-val">6</span>
+        </label>
+        <input type="range" id="petal-count-slider" min="3" max="10" step="1" value="6" />
+      </div>
+
+      <div class="control-item">
+        <label for="video-opacity-slider">
+          <span>摄像头背景透明度</span>
+          <span id="video-opacity-val">35%</span>
+        </label>
+        <input type="range" id="video-opacity-slider" min="0" max="100" step="5" value="35" />
+      </div>
+
+      <div class="control-toggles">
+        <label class="checkbox-label">
+          <input type="checkbox" id="toggle-skeleton" checked />
+          <span>显示 21 点手部骨骼连线</span>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="toggle-manual" />
+          <span>手动模拟模式 (免摄像头调试)</span>
+        </label>
+      </div>
+
+      <div class="control-item hidden" id="manual-slider-wrapper">
+        <label for="manual-tension-slider">
+          <span>手动模拟 Tension</span>
+          <span id="manual-tension-val">0.00</span>
+        </label>
+        <input type="range" id="manual-tension-slider" min="0" max="1" step="0.01" value="0" />
       </div>
     </div>
   </div>
 
-  <!-- 主业务逻辑 (ES Module) -->
+  <!-- 摄像头权限/错误提示浮层 -->
+  <div id="error-modal" class="modal hidden">
+    <div class="modal-content glass-panel">
+      <h2>⚠️ 无法访问摄像头</h2>
+      <p id="error-message">请检查浏览器摄像头权限设置，或确认设备已连接摄像头。</p>
+      <ul class="error-tips">
+        <li>请确保通过 <code>http://localhost</code> 或 <code>https://</code> 访问本页面。</li>
+        <li>若浏览器地址栏左侧有权限锁图标，请将“摄像头”设为“允许”并刷新。</li>
+        <li>如果您当前没有摄像头，可点击下方按钮开启<strong>手动交互模式</strong>体验花朵绽放。</li>
+      </ul>
+      <div class="modal-actions">
+        <button id="retry-camera-btn" class="btn primary-btn">重新请求摄像头</button>
+        <button id="use-manual-btn" class="btn secondary-btn">使用鼠标/滑块模拟模式</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 主逻辑脚本 -->
   <script type="module" src="./main.js"></script>
 </body>
 </html>

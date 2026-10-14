@@ -1,802 +1,786 @@
+import * as THREE from 'three';
+
 /**
- * 指尖生花 · 手势控制粒子花朵绽放 (Gesture Blooming Flower)
- * 技术栈：Three.js + MediaPipe Hands + GLSL ShaderMaterial
+ * ============================================================================
+ * 一、 全局可配置参数 (可根据创意需求自由调整)
+ * ============================================================================
  */
-
-import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-
-// ============================================================================
-// 1. 全局配置与参数 (Configuration)
-// ============================================================================
 const CONFIG = {
-  particleCount: 8000,            // 优化默认粒子数至 8000 (流畅丝滑且花型丰满)
-  easingFactor: 0.1,             // 缓动追随速率 currentSpread += (targetSpread - currentSpread) * 0.1
-  thresholdBud: 0.32,            // 握拳闭合阈值 (tension < 0.32)
-  thresholdBloom: 0.66,          // 张开盛开阈值 (tension > 0.66)
-  trackingAnchor: 'index_tip',   // 'index_tip' (食指指尖 #8) 或 'palm' (掌心 #9)
-  theme: 'sakura',               // 'sakura' | 'aurora' | 'sunflower'
-  cameraOpacity: 0.25,           // 摄像头背景不透明度
-  showSkeleton: true,            // 是否渲染骨骼连线
-  autoRotate: true               // 花朵轻微自转
+  // 粒子与花朵数学参数
+  particleCount: 15000,         // 初始粒子数量 (支持 5000 ~ 20000 动态重建)
+  petalCount: 6,                // 花瓣阶数 (极坐标玫瑰线参数 k)
+  flowerRadius: 2.35,           // 花朵完全绽放时的最大半径
+  budRadius: 0.42,              // 花苞闭合时的紧凑半径
+  basePointSize: 28.0,          // 粒子基础大小
+
+  // 手势张开度 (Tension) 归一化与阈值参数
+  ratioMin: 0.85,               // 握拳时 指尖到手腕距离 / 掌指关节到手腕距离 的经验下限
+  ratioMax: 2.05,               // 张开手掌时的经验上限
+  tensionSmoothing: 0.25,       // Tension 指数平滑系数
+  budThreshold: 0.32,           // tension < 0.32 判定为花苞闭合
+  bloomThreshold: 0.66,         // tension > 0.66 判定为完全绽放
+
+  // 缓动与位置跟随参数
+  spreadEasing: 0.1,            // 题目要求: currentSpread += (targetSpread - currentSpread) * 0.1
+  positionLerp: 0.14,           // 花朵中心跟随手部位置的平滑系数
+
+  // 视觉开关
+  showSkeleton: true,           // 是否绘制手部 21 关键点连线
+  manualMode: false             // 是否启用免摄像头手动调试模式
 };
 
-// 调色板预设 (RGB 归一化)
-const THEMES = {
-  sakura: {
-    core: new THREE.Color('#ffe066'),       // 花蕊金黄
-    petalInner: new THREE.Color('#ff5f9e'), // 内花瓣玫瑰粉
-    petalOuter: new THREE.Color('#b5179e'), // 外花瓣紫红
-    dust: new THREE.Color('#7209b7')        // 飘散粉尘荧光紫
-  },
-  aurora: {
-    core: new THREE.Color('#4cc9f0'),       // 青蓝花蕊
-    petalInner: new THREE.Color('#4361ee'), // 宝蓝内瓣
-    petalOuter: new THREE.Color('#3a0ca3'), // 幽紫渐变
-    dust: new THREE.Color('#06d6a0')        // 荧光绿飘尘
-  },
-  sunflower: {
-    core: new THREE.Color('#78350f'),       // 棕褐花盘
-    petalInner: new THREE.Color('#f59e0b'), // 耀眼橙金
-    petalOuter: new THREE.Color('#fbbf24'), // 亮黄花尖
-    dust: new THREE.Color('#fef08a')        // 晨曦光晕
-  }
+/**
+ * ============================================================================
+ * 二、 运行时状态数据
+ * ============================================================================
+ */
+const STATE = {
+  tension: 0.0,                 // 平滑后的手掌张开度 (0 ~ 1)
+  targetSpread: 0.0,            // 目标绽放度 (0 ~ 1)
+  currentSpread: 0.0,           // 当前缓动绽放度 (0 ~ 1)
+  handDetected: false,          // 当前帧是否检测到手部
+  handActivity: 0.0,            // 手部激活权重 (0 ~ 1 平滑过渡)
+  targetCenter: new THREE.Vector3(0, 0, 0), // 目标花朵 3D 中心
+  currentCenter: new THREE.Vector3(0, 0, 0),// 当前花朵 3D 中心
+  fingertipsWorld: [            // 5 个指尖在 Three.js 世界坐标系下的位置
+    new THREE.Vector3(),
+    new THREE.Vector3(),
+    new THREE.Vector3(),
+    new THREE.Vector3(),
+    new THREE.Vector3()
+  ]
 };
 
-// 手势与动画状态机
-const state = {
-  rawTension: 0.0,               // 原始计算张力
-  smoothedTension: 0.0,          // 平滑后手掌张力
-  targetSpread: 0.0,             // 绽放目标值 [0.0, 1.0]
-  currentSpread: 0.0,            // 当前缓动绽放插值 [0.0, 1.0]
-  handDetected: false,           // 是否捕捉到手部
-  handPosition: new THREE.Vector3(0, 0, 0), // 3D 平滑跟随位置
-  handRotation: new THREE.Euler(0, 0, 0),   // 手掌朝向
-  // 渲染统计
-  renderFps: 60,
-  renderFrameCount: 0,
-  lastRenderFpsTime: performance.now(),
-  // 视觉识别统计
-  visionFps: 0,
-  visionFrameCount: 0,
-  lastVisionFpsTime: performance.now(),
-  isProcessingVision: false      // 异步防拥塞标志位
+/**
+ * ============================================================================
+ * 三、 DOM 元素引用
+ * ============================================================================
+ */
+const dom = {
+  video: document.getElementById('webcam-video'),
+  landmarkCanvas: document.getElementById('landmark-canvas'),
+  webglContainer: document.getElementById('webgl-container'),
+  statusDot: document.getElementById('status-dot'),
+  statusText: document.getElementById('status-text'),
+  tensionValue: document.getElementById('tension-value'),
+  tensionBar: document.getElementById('tension-bar'),
+  spreadValue: document.getElementById('spread-value'),
+  spreadBar: document.getElementById('spread-bar'),
+  gestureBadge: document.getElementById('gesture-state-badge'),
+  particleSlider: document.getElementById('particle-count-slider'),
+  particleVal: document.getElementById('particle-count-val'),
+  petalSlider: document.getElementById('petal-count-slider'),
+  petalVal: document.getElementById('petal-count-val'),
+  opacitySlider: document.getElementById('video-opacity-slider'),
+  opacityVal: document.getElementById('video-opacity-val'),
+  toggleSkeleton: document.getElementById('toggle-skeleton'),
+  toggleManual: document.getElementById('toggle-manual'),
+  manualWrapper: document.getElementById('manual-slider-wrapper'),
+  manualSlider: document.getElementById('manual-tension-slider'),
+  manualVal: document.getElementById('manual-tension-val'),
+  errorModal: document.getElementById('error-modal'),
+  errorMessage: document.getElementById('error-message'),
+  retryCameraBtn: document.getElementById('retry-camera-btn'),
+  useManualBtn: document.getElementById('use-manual-btn')
 };
 
-// ============================================================================
-// 2. DOM 元素引用
-// ============================================================================
-const videoEl = document.getElementById('webcam');
-const skeletonCanvas = document.getElementById('skeleton-canvas');
-const webglCanvas = document.getElementById('webgl-canvas');
+const landmarkCtx = dom.landmarkCanvas.getContext('2d');
 
-const tensionValEl = document.getElementById('tension-value');
-const tensionFillEl = document.getElementById('tension-fill');
-const flowerStatePill = document.getElementById('flower-state-pill');
-const flowerStateText = document.getElementById('flower-state-text');
-const renderFpsStatEl = document.getElementById('render-fps-stat');
-const visionFpsStatEl = document.getElementById('vision-fps-stat');
-const modalContainer = document.getElementById('modal-container');
-const modalActionBtn = document.getElementById('modal-action-btn');
+/**
+ * ============================================================================
+ * 四、 GLSL 顶点着色器与片元着色器
+ * ============================================================================
+ */
+const vertexShader = /* glsl */ `
+  uniform float uTime;
+  uniform float uSpread;
+  uniform float uPixelRatio;
+  uniform float uBaseSize;
+  uniform float uHandActivity;
+  uniform vec3 uFlowerCenter;
+  uniform vec3 uFingertips[5];
 
-const skeletonCtx = skeletonCanvas.getContext('2d');
-
-// 离屏极速采样画布 (320x240, 专供手势检测, 降低 80% 视觉计算量)
-const visionCanvas = document.createElement('canvas');
-visionCanvas.width = 320;
-visionCanvas.height = 240;
-const visionCtx = visionCanvas.getContext('2d', { willReadFrequently: true });
-
-// ============================================================================
-// 3. Three.js 3D 粒子系统与 GLSL 着色器
-// ============================================================================
-let renderer, scene, camera, flowerPoints, flowerMaterial, flowerGeometry;
-const clock = new THREE.Clock();
-
-// GLSL 顶点着色器：在 GPU 中插值花苞 (Bud) 与 盛开 (Bloom) 两种几何形态
-const vertexShader = `
-  uniform float uBloom;        // 绽放插值 [0.0 ~ 1.0]
-  uniform float uTime;         // 动态运行时间
-  uniform float uPixelRatio;   // 屏幕像素比
-
-  attribute vec3 aBudPosition;   // 闭合花苞位置
-  attribute vec3 aBloomPosition; // 盛开形态位置
-  attribute vec3 aColor;         // 粒子颜色
-  attribute float aSize;         // 基础粒子尺寸
-  attribute vec3 aNoiseSeed;     // 粒子独立随机扰动种子
+  attribute vec3 aPositionBloom;
+  attribute vec3 aColor;
+  attribute vec3 aRandom; // x: 随机相位, y: 径向归一化层级(0~1), z: 粒子尺寸缩放
 
   varying vec3 vColor;
   varying float vAlpha;
+
+  // 2D 旋转矩阵
+  mat2 rotate2d(float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return mat2(c, -s, s, c);
+  }
 
   void main() {
     vColor = aColor;
 
-    // 1. 核心形态平滑插值 (使用 smoothstep 产生优雅曲线)
-    float t = smoothstep(0.0, 1.0, uBloom);
-    vec3 mixedPos = mix(aBudPosition, aBloomPosition, t);
-
-    // 2. 盛开旋转展开效果：闭合时微旋，盛开时如花冠舒展
-    float angle = (1.0 - t) * 1.8 * (mixedPos.y * 0.4);
-    float cosA = cos(angle);
-    float sinA = sin(angle);
-    vec3 pos = vec3(
-      mixedPos.x * cosA - mixedPos.z * sinA,
-      mixedPos.y,
-      mixedPos.x * sinA + mixedPos.z * cosA
+    // 1. 让内外层花瓣产生错落有致的绽放节奏（内层紧实、外层舒展）
+    float radialLayer = aRandom.y;
+    float localSpread = smoothstep(
+      0.0,
+      1.0,
+      clamp(uSpread * 1.25 - radialLayer * 0.25, 0.0, 1.0)
     );
 
-    // 3. 微风拂动与生命呼吸扰动 (Breathing & Wind Oscillation)
-    float sway = sin(uTime * 2.2 + aNoiseSeed.x * 6.28) * 0.08 * t;
-    float breathe = cos(uTime * 1.5 + pos.y * 3.0) * 0.04;
-    pos.x += sway + sin(pos.y * 4.0 + uTime) * 0.03 * t;
-    pos.y += breathe;
-    pos.z += cos(uTime * 2.0 + aNoiseSeed.y * 6.28) * 0.05 * t;
+    // 2. 在顶点着色器中插值：花苞位置 (position) -> 绽放位置 (aPositionBloom)
+    vec3 pos = mix(position, aPositionBloom, localSpread);
 
-    // 4. 视角投影计算
-    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    // 3. 绽放伴随旋转解旋效果：从含苞到盛开有柔和的螺旋展开感
+    float twistAngle = (1.0 - localSpread) * (1.2 + radialLayer * 0.8);
+    pos.xy = rotate2d(twistAngle) * pos.xy;
+
+    // 4. 随时间整体缓慢自转与呼吸律动
+    float slowRot = uTime * (0.12 + 0.08 * localSpread);
+    pos.xy = rotate2d(slowRot) * pos.xy;
+
+    float breath = sin(uTime * 2.2 + aRandom.x * 6.2831) * (0.03 + 0.06 * localSpread);
+    pos += normalize(pos + vec3(0.0001)) * breath;
+
+    // 5. 叠加手部中心位置偏移
+    vec3 worldPos = pos + uFlowerCenter;
+
+    // 6. 指尖微交互：计算粒子与 5 个指尖世界坐标的距离，产生轻柔的灵动扰动
+    if (uHandActivity > 0.01) {
+      for (int i = 0; i < 5; i++) {
+        vec3 tipPos = uFingertips[i];
+        vec3 diff = worldPos - tipPos;
+        float dist = length(diff);
+        float influenceRadius = 0.85;
+        if (dist < influenceRadius && dist > 0.001) {
+          float factor = pow(1.0 - dist / influenceRadius, 2.0) * uHandActivity;
+          // 指尖附近的粒子向外轻推并向镜头方向微浮，形成触碰光波感
+          worldPos += normalize(diff) * factor * 0.22;
+          worldPos.z += factor * 0.18;
+        }
+      }
+    }
+
+    vec4 mvPosition = modelViewMatrix * vec4(worldPos, 1.0);
     gl_Position = projectionMatrix * mvPosition;
 
-    // 5. 视角衰减点大小 (Perspective Point Size)
-    float pSize = aSize * (1.0 + t * 0.3); // 盛开时光芒略微放大
-    gl_PointSize = pSize * (280.0 / -mvPosition.z) * uPixelRatio;
+    // 7. 粒子大小随绽放度与透视距离动态计算
+    float sizeBoost = 0.75 + 0.55 * localSpread + 0.15 * sin(uTime * 3.0 + aRandom.x * 10.0);
+    gl_PointSize = uBaseSize * aRandom.z * sizeBoost * uPixelRatio * (1.0 / -mvPosition.z);
 
-    // 动态透明度 (花苞较密时略降，绽放时全透亮)
-    vAlpha = mix(0.75, 0.95, t);
+    // 透明度随绽放微调
+    vAlpha = 0.68 + 0.32 * localSpread;
   }
 `;
 
-// GLSL 片元着色器：程序化生成柔和星芒与光晕 (Soft Radial Particle Glow)
-const fragmentShader = `
+const fragmentShader = /* glsl */ `
+  uniform float uSpread;
   varying vec3 vColor;
   varying float vAlpha;
 
   void main() {
-    // 将点内坐标重映射为从中心 [-0.5, 0.5] 到原点的径向距离
-    vec2 coord = gl_PointCoord - vec2(0.5);
-    float dist = length(coord);
+    // 将方形点精灵裁剪为自带柔和光晕的发光圆点
+    vec2 uv = gl_PointCoord - vec2(0.5);
+    float dist = length(uv);
+    if (dist > 0.5) discard;
 
-    if (dist > 0.5) {
-      discard;
-    }
-
-    // 双层柔和辉光：强发光核心 + 柔和衰减边缘
+    // 中心高光核 + 边缘指数衰减光晕
+    float glow = pow(1.0 - dist * 2.0, 2.0);
     float core = smoothstep(0.18, 0.0, dist);
-    float halo = smoothstep(0.5, 0.0, dist);
 
-    // 混合发光颜色
-    vec3 glowColor = vColor + vec3(0.6, 0.5, 0.4) * core;
-    float finalAlpha = (halo * 0.7 + core * 0.6) * vAlpha;
+    // 绽放时色彩更加明亮通透
+    vec3 finalColor = vColor * (1.0 + 0.35 * uSpread) + vec3(core * 0.55);
 
-    gl_FragColor = vec4(glowColor, finalAlpha);
+    gl_FragColor = vec4(finalColor, glow * vAlpha);
   }
 `;
 
 /**
- * 初始化 Three.js 场景
+ * ============================================================================
+ * 五、 Three.js 场景与粒子花朵生成器
+ * ============================================================================
  */
-function initThree() {
+let scene, camera, renderer, clock;
+let flowerPoints = null;
+let flowerMaterial = null;
+
+function initThreeScene() {
   scene = new THREE.Scene();
 
-  const width = window.innerWidth;
-  const height = window.innerHeight;
-  camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-  camera.position.set(0, 0, 7.5);
+  camera = new THREE.PerspectiveCamera(
+    55,
+    window.innerWidth / window.innerHeight,
+    0.1,
+    100
+  );
+  camera.position.set(0, 0, 6.2);
 
   renderer = new THREE.WebGLRenderer({
-    canvas: webglCanvas,
+    antialias: true,
     alpha: true,
-    antialias: true
+    powerPreference: 'high-performance'
   });
-  renderer.setSize(width, height);
+  renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  dom.webglContainer.appendChild(renderer.domElement);
 
-  // 创建粒子花朵
-  createParticleFlower();
+  clock = new THREE.Clock();
 
-  // 窗口自适应调整
+  // 初始化着色器材质
+  flowerMaterial = new THREE.ShaderMaterial({
+    vertexShader,
+    fragmentShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uTime: { value: 0 },
+      uSpread: { value: 0 },
+      uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) },
+      uBaseSize: { value: CONFIG.basePointSize },
+      uHandActivity: { value: 0.0 },
+      uFlowerCenter: { value: new THREE.Vector3(0, 0, 0) },
+      uFingertips: { value: STATE.fingertipsWorld }
+    }
+  });
+
+  // 构建粒子花朵几何体
+  buildFlowerParticles(CONFIG.particleCount, CONFIG.petalCount);
+
   window.addEventListener('resize', onWindowResize);
 }
 
 /**
- * 根据极坐标花瓣数学公式生成三维花苞与花朵粒子几何数据
+ * 使用极坐标花瓣数学函数生成花苞态与绽放态双形态顶点数据
+ * @param {number} count 粒子数量 (5000 ~ 20000)
+ * @param {number} petalCount 花瓣阶数 k
  */
-function createParticleFlower() {
+function buildFlowerParticles(count, petalCount) {
   if (flowerPoints) {
     scene.remove(flowerPoints);
-    flowerGeometry.dispose();
-    flowerMaterial.dispose();
+    flowerPoints.geometry.dispose();
   }
 
-  const count = CONFIG.particleCount;
-  flowerGeometry = new THREE.BufferGeometry();
+  const geometry = new THREE.BufferGeometry();
 
-  const budPositions = new Float32Array(count * 3);
-  const bloomPositions = new Float32Array(count * 3);
+  const positionsBud = new Float32Array(count * 3);
+  const positionsBloom = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
-  const sizes = new Float32Array(count);
-  const seeds = new Float32Array(count * 3);
+  const randoms = new Float32Array(count * 3);
 
-  const themeColors = THEMES[CONFIG.theme];
+  // 定义多层渐变色彩：花蕊暖金 -> 内瓣玫粉 -> 外瓣仙紫 -> 瓣尖青蓝微光
+  const colorStamen = new THREE.Color('#ffe066');
+  const colorInnerPetal = new THREE.Color('#ff3385');
+  const colorOuterPetal = new THREE.Color('#9d4edd');
+  const colorTipGlow = new THREE.Color('#00f5d4');
+  const tempColor = new THREE.Color();
+
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5)); // 黄金角分布保证粒子均匀不扎堆
 
   for (let i = 0; i < count; i++) {
     const i3 = i * 3;
-    const ratio = i / count;
 
-    // 随机独立种子
-    seeds[i3 + 0] = Math.random();
-    seeds[i3 + 1] = Math.random();
-    seeds[i3 + 2] = Math.random();
+    // 归一化径向参数 u ∈ [0, 1]
+    const u = Math.pow(i / count, 0.78);
+    // 极角 theta
+    const theta = i * goldenAngle;
 
-    // -------------------------------------------------------------
-    // A. 盛开形态 (Bloom Position) - 极坐标数学花瓣系统
-    // -------------------------------------------------------------
-    // 将粒子划分为三大区域：10% 花蕊花心，75% 极坐标多层花瓣，15% 环绕光尘
-    let bloomX = 0, bloomY = 0, bloomZ = 0;
-    let pColor = new THREE.Color();
-    let pSize = 0.08 + Math.random() * 0.06;
+    // 分层偏置，制造多层立体花冠（5 层花瓣错位）
+    const layerIndex = i % 5;
+    const layerPhase = (layerIndex * Math.PI) / petalCount * 0.5;
 
-    if (ratio < 0.12) {
-      // 1. 花蕊中心区域 (Stamen Core)
-      const r = Math.pow(Math.random(), 0.5) * 0.45;
-      const theta = Math.random() * Math.PI * 2;
-      bloomX = r * Math.cos(theta);
-      bloomZ = r * Math.sin(theta);
-      bloomY = (Math.random() - 0.5) * 0.3 + 0.1;
+    // 极坐标花瓣轮廓函数：|cos(k * θ / 2)|^0.65 结合正弦波纹
+    const rawPetal = Math.pow(Math.abs(Math.cos(petalCount * (theta + layerPhase) * 0.5)), 0.65);
+    const harmonicRipple = 0.12 * Math.sin(petalCount * 2.0 * theta);
+    const petalShape = 0.38 + 0.62 * rawPetal + harmonicRipple;
 
-      pColor.copy(themeColors.core).lerp(themeColors.petalInner, Math.random() * 0.3);
-      pSize *= 1.25;
+    // ------------------------------------------------------------------
+    // 1. 计算【闭合花苞态】(position) —— 水滴形收拢球体
+    // ------------------------------------------------------------------
+    const budSin = Math.sin(u * Math.PI);
+    const rBud = CONFIG.budRadius * budSin * (0.65 + 0.35 * rawPetal) + (Math.random() - 0.5) * 0.04;
+    const twistBud = theta + u * 1.4;
 
-    } else if (ratio < 0.88) {
-      // 2. 玫瑰/莲花极坐标花瓣方程 (Multi-tiered Polar Rose Petals)
-      // 花瓣层级分布 (4 层花瓣，自内向外辐射递增)
-      const petalRatio = (ratio - 0.12) / 0.76;
-      const layer = Math.floor(petalRatio * 4);
-      const k = 5; // 5 片花瓣对称
-      const layerOffset = layer * (Math.PI / 5); // 层间花瓣错落交叠
+    positionsBud[i3]     = rBud * Math.cos(twistBud);
+    positionsBud[i3 + 1] = rBud * Math.sin(twistBud);
+    // Z 轴前后收拢成花苞尖端
+    positionsBud[i3 + 2] = (u - 0.45) * CONFIG.budRadius * 1.6 + Math.cos(u * Math.PI) * 0.15;
 
-      const theta = Math.random() * Math.PI * 2;
-      // 极坐标瓣形调制：r_base + r_amp * cos(k * theta)
-      const petalWave = Math.cos(k * (theta + layerOffset));
-      const normalizedWave = Math.pow(Math.abs(petalWave), 0.75);
+    // ------------------------------------------------------------------
+    // 2. 计算【盛开绽放态】(aPositionBloom) —— 3D 碗状立体花冠
+    // ------------------------------------------------------------------
+    const isStamen = u < 0.14; // 前 14% 粒子作为中心花蕊
+    let rBloom, zBloom;
 
-      // 径向半径：随层级由内到外展开 (半径 0.5 ~ 2.4)
-      const baseRadius = 0.5 + layer * 0.45;
-      const r = (baseRadius + normalizedWave * 0.75) * (0.6 + Math.random() * 0.4);
-
-      bloomX = r * Math.cos(theta);
-      bloomZ = r * Math.sin(theta);
-
-      // 3D 杯状花瓣卷曲弧度曲面: z = a * r^2 - b
-      const lift = Math.sin(r * 1.2) * 0.7 - (1.0 - petalRatio) * 0.3;
-      bloomY = lift + (Math.random() - 0.5) * 0.15;
-
-      // 花瓣渐变配色：内部粉紫 -> 外部深渐变
-      const colorMix = petalRatio + (Math.random() - 0.5) * 0.15;
-      pColor.copy(themeColors.petalInner).lerp(themeColors.petalOuter, Math.min(Math.max(colorMix, 0), 1));
-
+    if (isStamen) {
+      // 花蕊簇拥在花心并向镜头方向微凸
+      const stamenU = u / 0.14;
+      rBloom = CONFIG.flowerRadius * 0.22 * stamenU;
+      zBloom = 0.35 * Math.cos(stamenU * Math.PI * 0.5) + (Math.random() - 0.5) * 0.08;
     } else {
-      // 3. 漂浮光尘微粒 (Swirling Stardust Aura)
-      const r = 2.2 + Math.random() * 1.5;
-      const theta = Math.random() * Math.PI * 2;
-      const phi = (Math.random() - 0.5) * Math.PI * 0.8;
-      bloomX = r * Math.cos(theta) * Math.cos(phi);
-      bloomY = r * Math.sin(phi) + Math.sin(theta * 3.0) * 0.4;
-      bloomZ = r * Math.sin(theta) * Math.cos(phi);
+      // 花瓣沿极坐标方程向外舒展，且随层级呈现碗状弧度
+      const petalU = (u - 0.14) / 0.86;
+      rBloom = CONFIG.flowerRadius * (0.16 + 0.84 * Math.pow(petalU, 0.85) * petalShape);
+      rBloom += (Math.random() - 0.5) * 0.06;
 
-      pColor.copy(themeColors.dust);
-      pSize *= 0.75;
+      // 立体高度：内层向上捧起，外层花瓣尖端优雅后翻
+      const cupCurve = Math.sin(petalU * Math.PI) * 0.65 - Math.pow(petalU, 2.2) * 0.55;
+      const layerZOffset = (layerIndex - 2) * 0.07 * petalU;
+      zBloom = cupCurve + layerZOffset + rawPetal * 0.18;
     }
 
-    bloomPositions[i3 + 0] = bloomX;
-    bloomPositions[i3 + 1] = bloomY;
-    bloomPositions[i3 + 2] = bloomZ;
+    positionsBloom[i3]     = rBloom * Math.cos(theta);
+    positionsBloom[i3 + 1] = rBloom * Math.sin(theta);
+    positionsBloom[i3 + 2] = zBloom;
 
-    // -------------------------------------------------------------
-    // B. 花苞形态 (Bud Position) - 螺旋紧密水滴柱体锥形
-    // -------------------------------------------------------------
-    // 花苞半径小、高度紧凑收拢于中心竖向
-    const budHeight = (Math.random() - 0.3) * 2.2; // Y 轴高 -0.6 ~ 1.6
-    // 水滴截面半径：底部收拢，腰部微鼓，顶部聚集成花尖
-    const normH = (budHeight + 0.6) / 2.2;
-    const budRadius = Math.sin(normH * Math.PI) * 0.45 * (0.4 + Math.random() * 0.6);
-    const budAngle = Math.random() * Math.PI * 2;
+    // ------------------------------------------------------------------
+    // 3. 计算【粒子渐变颜色】(aColor)
+    // ------------------------------------------------------------------
+    if (isStamen) {
+      tempColor.copy(colorStamen).lerp(colorInnerPetal, u / 0.14 * 0.4);
+    } else {
+      const t = (u - 0.14) / 0.86;
+      if (t < 0.55) {
+        tempColor.copy(colorInnerPetal).lerp(colorOuterPetal, t / 0.55);
+      } else {
+        tempColor.copy(colorOuterPetal).lerp(colorTipGlow, (t - 0.55) / 0.45 * rawPetal);
+      }
+    }
+    // 加入轻微亮度随机扰动，丰富星尘层次感
+    const brightnessJitter = 0.88 + Math.random() * 0.28;
+    colors[i3]     = Math.min(1.0, tempColor.r * brightnessJitter);
+    colors[i3 + 1] = Math.min(1.0, tempColor.g * brightnessJitter);
+    colors[i3 + 2] = Math.min(1.0, tempColor.b * brightnessJitter);
 
-    budPositions[i3 + 0] = budRadius * Math.cos(budAngle);
-    budPositions[i3 + 1] = budHeight;
-    budPositions[i3 + 2] = budRadius * Math.sin(budAngle);
-
-    // 颜色与尺寸
-    colors[i3 + 0] = pColor.r;
-    colors[i3 + 1] = pColor.g;
-    colors[i3 + 2] = pColor.b;
-    sizes[i] = pSize;
+    // ------------------------------------------------------------------
+    // 4. 附加随机属性 (aRandom)
+    // ------------------------------------------------------------------
+    randoms[i3]     = Math.random();                  // 随机相位
+    randoms[i3 + 1] = u;                              // 径向层级 (0~1)
+    randoms[i3 + 2] = 0.55 + Math.random() * 0.95;    // 粒子尺寸倍率
   }
 
-  flowerGeometry.setAttribute('position', new THREE.BufferAttribute(budPositions, 3)); // 初始锚定
-  flowerGeometry.setAttribute('aBudPosition', new THREE.BufferAttribute(budPositions, 3));
-  flowerGeometry.setAttribute('aBloomPosition', new THREE.BufferAttribute(bloomPositions, 3));
-  flowerGeometry.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
-  flowerGeometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-  flowerGeometry.setAttribute('aNoiseSeed', new THREE.BufferAttribute(seeds, 3));
+  geometry.setAttribute('position', new THREE.BufferAttribute(positionsBud, 3));
+  geometry.setAttribute('aPositionBloom', new THREE.BufferAttribute(positionsBloom, 3));
+  geometry.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute('aRandom', new THREE.BufferAttribute(randoms, 3));
 
-  // 自定义 ShaderMaterial
-  flowerMaterial = new THREE.ShaderMaterial({
-    vertexShader: vertexShader,
-    fragmentShader: fragmentShader,
-    uniforms: {
-      uBloom: { value: 0.0 },
-      uTime: { value: 0.0 },
-      uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) }
-    },
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending
-  });
-
-  flowerPoints = new THREE.Points(flowerGeometry, flowerMaterial);
+  flowerPoints = new THREE.Points(geometry, flowerMaterial);
   scene.add(flowerPoints);
 }
 
-/**
- * 屏幕尺寸改变适配
- */
 function onWindowResize() {
-  const width = window.innerWidth;
-  const height = window.innerHeight;
-
-  camera.aspect = width / height;
+  camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  flowerMaterial.uniforms.uPixelRatio.value = Math.min(window.devicePixelRatio, 2);
 
-  renderer.setSize(width, height);
-  if (flowerMaterial) {
-    flowerMaterial.uniforms.uPixelRatio.value = Math.min(window.devicePixelRatio, 1.5);
-  }
-
-  resizeCanvas(skeletonCanvas);
+  dom.landmarkCanvas.width = window.innerWidth;
+  dom.landmarkCanvas.height = window.innerHeight;
 }
-
-function resizeCanvas(canvas) {
-  if (!canvas) return;
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-}
-
-// ============================================================================
-// 4. 手势识别与张力计算 (MediaPipe Hands & Tension Math)
-// ============================================================================
 
 /**
- * 欧几里得空间距离辅助函数
+ * ============================================================================
+ * 六、 手势张开度 (Tension) 计算与 3D 坐标映射
+ * ============================================================================
  */
-function distance3D(p1, p2) {
+
+/**
+ * 计算两个 MediaPipe 3D 关键点之间的欧氏距离
+ */
+function dist3D(p1, p2) {
   const dx = p1.x - p2.x;
   const dy = p1.y - p2.y;
   const dz = (p1.z || 0) - (p2.z || 0);
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  return Math.hypot(dx, dy, dz);
 }
 
 /**
- * 计算手掌张开度 Tension [0.0 ~ 1.0]
- *
- * 【算法公式】：
- * 1. 选取手腕关键点 Wrist (#0) 作为基准原点。
- * 2. 计算 4 根长指 (食指#8, 中指#12, 无名指#16, 小指#20) 指尖到手腕的平均距离 D_tip。
- * 3. 计算 4 个掌指关节 MCP (#5, #9, #13, #17) 到手腕的平均骨架基准距离 D_mcp。
- * 4. 计算无量纲伸展比例 Ratio = D_tip / D_mcp：
- *    - 握拳闭合时：手指卷曲紧贴手掌，D_tip 趋近甚至小于 D_mcp，Ratio ≈ 0.95 ~ 1.15
- *    - 完全张开时：手指全力向外辐射展开，Ratio ≈ 2.10 ~ 2.45
- * 5. 归一化并限制在 [0.0, 1.0] 区间，配合时间加权平滑滤波 (EMA)。
+ * 根据手部 21 个关键点计算手掌张开度 tension ∈ [0, 1]
+ * 公式：
+ *   1. 分别计算食指(8)、中指(12)、无名指(16)、小指(20)指尖到手腕(0)的距离，
+ *      除以对应掌指关节(5, 9, 13, 17)到手腕(0)的距离，得到尺度无关的伸展比值 R_fingers。
+ *   2. 计算拇指尖(4)到小指根(17)的距离除以掌宽(5到17)，得到拇指张开比值 R_thumb。
+ *   3. 加权平均后按 [ratioMin, ratioMax] 线性归一化并 clamp 到 [0, 1]。
  */
-function calculateHandTension(landmarks) {
+function computeHandTension(landmarks) {
   const wrist = landmarks[0];
-  const tips = [8, 12, 16, 20];
-  const mcps = [5, 9, 13, 17];
-
-  // 指尖平均距离
-  let sumTipDist = 0;
-  for (let i = 0; i < tips.length; i++) {
-    sumTipDist += distance3D(landmarks[tips[i]], wrist);
-  }
-  const avgTipDist = sumTipDist / tips.length;
-
-  // 掌指关节平均基准距离 (手掌固有尺度)
-  let sumMcpDist = 0;
-  for (let i = 0; i < mcps.length; i++) {
-    sumMcpDist += distance3D(landmarks[mcps[i]], wrist);
-  }
-  const avgMcpDist = Math.max(sumMcpDist / mcps.length, 0.001);
-
-  // 无量纲张开度比率
-  const ratio = avgTipDist / avgMcpDist;
-
-  // 经验归一化校准区间 (Min: 1.15 握拳, Max: 2.15 全张开)
-  const minRatio = 1.15;
-  const maxRatio = 2.15;
-  const normalized = (ratio - minRatio) / (maxRatio - minRatio);
-
-  return Math.min(Math.max(normalized, 0.0), 1.0);
-}
-
-/**
- * 将 2D 镜像归一化坐标转换映射到 Three.js 3D 世界坐标
- */
-function mapLandmarkToWorld(landmark, cameraDistance = 7.5) {
-  // 水平镜像翻转 (自拍模式)：x -> 1.0 - x
-  const mirroredX = 1.0 - landmark.x;
-  const ndcX = mirroredX * 2.0 - 1.0;
-  const ndcY = -(landmark.y * 2.0 - 1.0);
-
-  // 根据相机视场角 (FOV=45°) 计算对应深度处可视平面尺寸
-  const vFovRad = (camera.fov * Math.PI) / 180;
-  const visibleHeight = 2.0 * Math.tan(vFovRad / 2.0) * cameraDistance;
-  const visibleWidth = visibleHeight * camera.aspect;
-
-  return new THREE.Vector3(
-    (ndcX * visibleWidth) / 2.0,
-    (ndcY * visibleHeight) / 2.0,
-    0.0
-  );
-}
-
-/**
- * 绘制手部 21 关键点骨架连线
- */
-function drawSkeleton(landmarks) {
-  skeletonCtx.clearRect(0, 0, skeletonCanvas.width, skeletonCanvas.height);
-  if (!CONFIG.showSkeleton || !landmarks) return;
-
-  const w = skeletonCanvas.width;
-  const h = skeletonCanvas.height;
-
-  // 手指骨节连接关系列表
-  const connections = [
-    [0, 1], [1, 2], [2, 3], [3, 4],       // 拇指
-    [0, 5], [5, 6], [6, 7], [7, 8],       // 食指
-    [0, 9], [9, 10], [10, 11], [11, 12],   // 中指
-    [0, 13], [13, 14], [14, 15], [15, 16],// 无名指
-    [0, 17], [17, 18], [18, 19], [19, 20],// 小指
-    [5, 9], [9, 13], [13, 17]             // 掌骨横连
+  const fingerPairs = [
+    { tip: 8, mcp: 5 },   // 食指
+    { tip: 12, mcp: 9 },  // 中指
+    { tip: 16, mcp: 13 }, // 无名指
+    { tip: 20, mcp: 17 }  // 小指
   ];
 
-  skeletonCtx.save();
-  // 镜像翻转以对齐相机预览
-  skeletonCtx.translate(w, 0);
-  skeletonCtx.scale(-1, 1);
+  let sumRatio = 0;
+  for (const pair of fingerPairs) {
+    const tipDist = dist3D(landmarks[pair.tip], wrist);
+    const mcpDist = Math.max(0.0001, dist3D(landmarks[pair.mcp], wrist));
+    sumRatio += tipDist / mcpDist;
+  }
+  const fingersRatio = sumRatio / 4.0;
 
-  // 1. 绘制连线
-  skeletonCtx.strokeStyle = 'rgba(255, 95, 158, 0.45)';
-  skeletonCtx.lineWidth = 2.5;
-  skeletonCtx.lineCap = 'round';
-  skeletonCtx.lineJoin = 'round';
+  // 拇指张开度考量
+  const thumbSpan = dist3D(landmarks[4], landmarks[17]);
+  const palmWidth = Math.max(0.0001, dist3D(landmarks[5], landmarks[17]));
+  const thumbRatio = thumbSpan / palmWidth;
 
-  connections.forEach(([i, j]) => {
-    const p1 = landmarks[i];
-    const p2 = landmarks[j];
-    skeletonCtx.beginPath();
-    skeletonCtx.moveTo(p1.x * w, p1.y * h);
-    skeletonCtx.lineTo(p2.x * w, p2.y * h);
-    skeletonCtx.stroke();
-  });
+  const combinedRatio = 0.8 * fingersRatio + 0.2 * thumbRatio;
 
-  // 2. 绘制关节点
-  landmarks.forEach((p, idx) => {
-    const px = p.x * w;
-    const py = p.y * h;
-
-    skeletonCtx.beginPath();
-    if (idx === 8 && CONFIG.trackingAnchor === 'index_tip') {
-      // 食指指尖高亮光圈
-      skeletonCtx.arc(px, py, 7, 0, Math.PI * 2);
-      skeletonCtx.fillStyle = '#ffd166';
-      skeletonCtx.shadowColor = '#ffd166';
-      skeletonCtx.shadowBlur = 12;
-    } else if (idx === 9 && CONFIG.trackingAnchor === 'palm') {
-      // 掌心高亮光圈
-      skeletonCtx.arc(px, py, 7, 0, Math.PI * 2);
-      skeletonCtx.fillStyle = '#4cc9f0';
-      skeletonCtx.shadowColor = '#4cc9f0';
-      skeletonCtx.shadowBlur = 12;
-    } else {
-      skeletonCtx.arc(px, py, 3.5, 0, Math.PI * 2);
-      skeletonCtx.fillStyle = '#ffffff';
-      skeletonCtx.shadowBlur = 0;
-    }
-    skeletonCtx.fill();
-  });
-
-  skeletonCtx.restore();
+  // 归一化到 0 ~ 1
+  const rawTension = (combinedRatio - CONFIG.ratioMin) / (CONFIG.ratioMax - CONFIG.ratioMin);
+  return Math.max(0.0, Math.min(1.0, rawTension));
 }
 
 /**
- * MediaPipe Hands 关键点识别回调
+ * 将 tension 映射为花朵目标绽放度 targetSpread：
+ * - tension < 0.32 -> 0.0 (花苞闭合)
+ * - tension > 0.66 -> 1.0 (完全绽放)
+ * - 0.32 ~ 0.66 之间使用 smoothstep 平滑过渡
+ */
+function mapTensionToSpread(tension) {
+  if (tension < CONFIG.budThreshold) {
+    return 0.0;
+  }
+  if (tension > CONFIG.bloomThreshold) {
+    return 1.0;
+  }
+  const t = (tension - CONFIG.budThreshold) / (CONFIG.bloomThreshold - CONFIG.budThreshold);
+  return t * t * (3.0 - 2.0 * t); // 标准三次 Hermite 平滑插值
+}
+
+/**
+ * 将 MediaPipe 归一化坐标 (x, y ∈ [0, 1]) 转换为 Three.js z=0 平面上的世界坐标
+ * 注意：由于视频画面做了水平镜像 (scaleX(-1))，X 轴使用 (0.5 - landmark.x) 对齐
+ */
+function landmarkToWorld(landmark) {
+  const fovRad = THREE.MathUtils.degToRad(camera.fov);
+  const visibleHeight = 2.0 * Math.tan(fovRad * 0.5) * camera.position.z;
+  const visibleWidth = visibleHeight * camera.aspect;
+
+  const worldX = (0.5 - landmark.x) * visibleWidth;
+  const worldY = (0.5 - landmark.y) * visibleHeight;
+  const worldZ = -landmark.z * 2.5;
+  return new THREE.Vector3(worldX, worldY, worldZ);
+}
+
+/**
+ * ============================================================================
+ * 七、 MediaPipe Hands 初始化与摄像头视频流管理
+ * ============================================================================
+ */
+let handsDetector = null;
+let isProcessingFrame = false;
+let cameraStream = null;
+
+async function initMediaPipeAndCamera() {
+  try {
+    // 1. 初始化 MediaPipe Hands 实例
+    const HandsConstructor = window.Hands;
+    if (!HandsConstructor) {
+      throw new Error('MediaPipe Hands 脚本加载失败，请检查网络连接。');
+    }
+
+    handsDetector = new HandsConstructor({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+    });
+
+    handsDetector.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.65,
+      minTrackingConfidence: 0.65
+    });
+
+    handsDetector.onResults(onHandsResults);
+
+    // 2. 请求摄像头权限并启动流
+    await startWebcam();
+  } catch (err) {
+    handleCameraError(err);
+  }
+}
+
+async function startWebcam() {
+  dom.errorModal.classList.add('hidden');
+  updateStatus('loading', '正在请求摄像头权限...');
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('当前浏览器环境不支持 getUserMedia，请使用 localhost 或 HTTPS 访问。');
+  }
+
+  // 释放已有流
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((t) => t.stop());
+  }
+
+  cameraStream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: 'user',
+      width: { ideal: 1280 },
+      height: { ideal: 720 }
+    },
+    audio: false
+  });
+
+  dom.video.srcObject = cameraStream;
+  await dom.video.play();
+
+  dom.landmarkCanvas.width = window.innerWidth;
+  dom.landmarkCanvas.height = window.innerHeight;
+
+  updateStatus('ready', '摄像头已就绪 · 请将手掌置于镜头前（握拳闭合 / 张开绽放）');
+  requestAnimationFrame(processVideoLoop);
+}
+
+async function processVideoLoop() {
+  if (!CONFIG.manualMode && dom.video.readyState >= 2 && handsDetector && !isProcessingFrame) {
+    isProcessingFrame = true;
+    try {
+      await handsDetector.send({ image: dom.video });
+    } catch (e) {
+      console.warn('MediaPipe 帧处理跳过:', e);
+    }
+    isProcessingFrame = false;
+  }
+  requestAnimationFrame(processVideoLoop);
+}
+
+/**
+ * MediaPipe 识别结果回调
  */
 function onHandsResults(results) {
+  // 清空 2D 骨骼画布
+  landmarkCtx.save();
+  landmarkCtx.clearRect(0, 0, dom.landmarkCanvas.width, dom.landmarkCanvas.height);
+
   if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-    state.handDetected = true;
     const landmarks = results.multiHandLandmarks[0];
+    STATE.handDetected = true;
 
-    // 1. 计算手掌张开度
-    const tension = calculateHandTension(landmarks);
-    state.rawTension = tension;
-    // 指数移动平均平滑滤波 (EMA Smoothing)
-    state.smoothedTension += (tension - state.smoothedTension) * 0.2;
-
-    // 2. 映射张开度为绽放目标值
-    // tension < 0.32: 闭合花苞 (targetSpread = 0)
-    // tension > 0.66: 完全绽放 (targetSpread = 1)
-    // 0.32 ~ 0.66: 线性平滑过渡
-    if (state.smoothedTension < CONFIG.thresholdBud) {
-      state.targetSpread = 0.0;
-    } else if (state.smoothedTension > CONFIG.thresholdBloom) {
-      state.targetSpread = 1.0;
-    } else {
-      state.targetSpread = (state.smoothedTension - CONFIG.thresholdBud) / (CONFIG.thresholdBloom - CONFIG.thresholdBud);
+    // 1. 可选绘制 21 个手部关键点与连线
+    if (CONFIG.showSkeleton) {
+      if (window.drawConnectors && window.HAND_CONNECTIONS) {
+        window.drawConnectors(landmarkCtx, landmarks, window.HAND_CONNECTIONS, {
+          color: 'rgba(0, 242, 254, 0.65)',
+          lineWidth: 2.5
+        });
+      }
+      if (window.drawLandmarks) {
+        window.drawLandmarks(landmarkCtx, landmarks, {
+          color: '#ff4d94',
+          fillColor: '#ffffff',
+          lineWidth: 1,
+          radius: 3.5
+        });
+      }
     }
 
-    // 3. 计算花朵锚定位置 (食指指尖 #8 或 掌心 #9)
-    const anchorIdx = (CONFIG.trackingAnchor === 'index_tip') ? 8 : 9;
-    const targetAnchorLandmark = landmarks[anchorIdx];
-    const targetWorldPos = mapLandmarkToWorld(targetAnchorLandmark);
+    // 2. 计算平滑后的手掌张开度 tension
+    const rawTension = computeHandTension(landmarks);
+    STATE.tension += (rawTension - STATE.tension) * CONFIG.tensionSmoothing;
 
-    // 平滑位置跟随
-    state.handPosition.lerp(targetWorldPos, 0.16);
+    // 3. 映射为花朵目标绽放度 targetSpread
+    STATE.targetSpread = mapTensionToSpread(STATE.tension);
 
-    // 4. 计算手腕到指尖的方向向量，控制花朵倾斜角度
-    const wristWorld = mapLandmarkToWorld(landmarks[0]);
-    const dir = targetWorldPos.clone().sub(wristWorld).normalize();
-    const targetRotZ = Math.atan2(dir.y, dir.x) - Math.PI / 2;
-    state.handRotation.z += (targetRotZ - state.handRotation.z) * 0.1;
+    // 4. 计算手部中心点（取中指根部 9 与食指尖 8 的加权位置，让花朵悬浮在掌心/指尖上方）
+    const palmCenter = {
+      x: landmarks[9].x * 0.65 + landmarks[8].x * 0.35,
+      y: landmarks[9].y * 0.65 + landmarks[8].y * 0.35,
+      z: landmarks[9].z
+    };
+    STATE.targetCenter.copy(landmarkToWorld(palmCenter));
 
-    // 5. 渲染骨架连线
-    drawSkeleton(landmarks);
-
+    // 5. 更新 5 个指尖的 3D 世界坐标供顶点着色器交互使用
+    const tipIndices = [4, 8, 12, 16, 20];
+    for (let i = 0; i < 5; i++) {
+      STATE.fingertipsWorld[i].copy(landmarkToWorld(landmarks[tipIndices[i]]));
+    }
   } else {
-    // 未检测到手部时保持轻微默认花苞状态缓缓回正
-    state.handDetected = false;
-    skeletonCtx.clearRect(0, 0, skeletonCanvas.width, skeletonCanvas.height);
-    state.targetSpread = 0.15;
-    state.handPosition.lerp(new THREE.Vector3(0, -0.2, 0), 0.05);
+    STATE.handDetected = false;
   }
 
-  // 更新 HUD 界面显示
-  updateHUD();
+  landmarkCtx.restore();
+}
+
+function handleCameraError(err) {
+  console.error('摄像头初始化异常:', err);
+  updateStatus('error', `摄像头未启用: ${err.message || '权限被拒绝或未找到设备'}`);
+  dom.errorMessage.textContent = `错误详情：${err.name || 'Error'} - ${err.message || '无法调用摄像头设备'}`;
+  dom.errorModal.classList.remove('hidden');
+}
+
+function updateStatus(type, message) {
+  dom.statusDot.className = 'status-dot ' + type;
+  dom.statusText.textContent = message;
 }
 
 /**
- * 界面 HUD 仪表盘与状态标签更新
+ * ============================================================================
+ * 八、 UI 控件事件绑定与手动调试模式
+ * ============================================================================
  */
-function updateHUD() {
-  tensionValEl.textContent = state.smoothedTension.toFixed(2);
-  tensionFillEl.style.width = `${(state.smoothedTension * 100).toFixed(1)}%`;
+function initUIEvents() {
+  // 粒子数量动态调节 (5000 ~ 20000)
+  dom.particleSlider.addEventListener('input', (e) => {
+    const val = parseInt(e.target.value, 10);
+    CONFIG.particleCount = val;
+    dom.particleVal.textContent = val;
+    buildFlowerParticles(CONFIG.particleCount, CONFIG.petalCount);
+  });
 
-  flowerStatePill.className = 'state-pill';
-  if (!state.handDetected) {
-    flowerStateText.textContent = '等待手势伸入镜头...';
-  } else if (state.smoothedTension < CONFIG.thresholdBud) {
-    flowerStatePill.classList.add('bud');
-    flowerStateText.textContent = '✊ 握拳：花苞聚拢闭合';
-  } else if (state.smoothedTension > CONFIG.thresholdBloom) {
-    flowerStatePill.classList.add('bloom');
-    flowerStateText.textContent = '🖐️ 绽放：指尖繁花盛开';
+  // 花瓣阶数动态调节 (3 ~ 10)
+  dom.petalSlider.addEventListener('input', (e) => {
+    const val = parseInt(e.target.value, 10);
+    CONFIG.petalCount = val;
+    dom.petalVal.textContent = val;
+    buildFlowerParticles(CONFIG.particleCount, CONFIG.petalCount);
+  });
+
+  // 视频背景透明度调节
+  dom.opacitySlider.addEventListener('input', (e) => {
+    const val = parseInt(e.target.value, 10);
+    dom.opacityVal.textContent = `${val}%`;
+    dom.video.style.opacity = (val / 100).toFixed(2);
+  });
+
+  // 切换骨骼连线显示
+  dom.toggleSkeleton.addEventListener('change', (e) => {
+    CONFIG.showSkeleton = e.target.checked;
+    if (!CONFIG.showSkeleton) {
+      landmarkCtx.clearRect(0, 0, dom.landmarkCanvas.width, dom.landmarkCanvas.height);
+    }
+  });
+
+  // 切换手动模拟模式
+  dom.toggleManual.addEventListener('change', (e) => {
+    enableManualMode(e.target.checked);
+  });
+
+  // 手动 Tension 滑块
+  dom.manualSlider.addEventListener('input', (e) => {
+    const val = parseFloat(e.target.value);
+    dom.manualVal.textContent = val.toFixed(2);
+    if (CONFIG.manualMode) {
+      STATE.tension = val;
+      STATE.targetSpread = mapTensionToSpread(val);
+    }
+  });
+
+  // 手动模式下鼠标/触摸移动跟随花朵位置
+  window.addEventListener('pointermove', (e) => {
+    if (!CONFIG.manualMode) return;
+    const normX = 1.0 - e.clientX / window.innerWidth; // 与镜像坐标系保持一致
+    const normY = e.clientY / window.innerHeight;
+    const worldPos = landmarkToWorld({ x: normX, y: normY, z: 0 });
+    STATE.targetCenter.copy(worldPos);
+    STATE.fingertipsWorld[1].copy(worldPos);
+  });
+
+  // 错误弹窗按钮
+  dom.retryCameraBtn.addEventListener('click', () => {
+    startWebcam().catch(handleCameraError);
+  });
+
+  dom.useManualBtn.addEventListener('click', () => {
+    dom.errorModal.classList.add('hidden');
+    dom.toggleManual.checked = true;
+    enableManualMode(true);
+  });
+}
+
+function enableManualMode(enabled) {
+  CONFIG.manualMode = enabled;
+  if (enabled) {
+    dom.manualWrapper.classList.remove('hidden');
+    STATE.handDetected = true;
+    STATE.tension = parseFloat(dom.manualSlider.value);
+    STATE.targetSpread = mapTensionToSpread(STATE.tension);
+    updateStatus('ready', '已开启手动模拟模式 · 拖动滑块控制绽放，移动鼠标带动花朵');
   } else {
-    flowerStatePill.classList.add('growing');
-    flowerStateText.textContent = '🌱 舒展：含苞待放中...';
+    dom.manualWrapper.classList.add('hidden');
+    STATE.handDetected = false;
+    updateStatus('ready', '已切回摄像头手势识别模式');
   }
 }
 
-// ============================================================================
-// 5. 核心动画循环 (Render Loop)
-// ============================================================================
+/**
+ * 更新 HUD 仪表盘上的数值与状态徽章
+ */
+function updateHUD() {
+  dom.tensionValue.textContent = STATE.tension.toFixed(2);
+  dom.tensionBar.style.width = `${(STATE.tension * 100).toFixed(1)}%`;
+
+  dom.spreadValue.textContent = STATE.currentSpread.toFixed(2);
+  dom.spreadBar.style.width = `${(STATE.currentSpread * 100).toFixed(1)}%`;
+
+  if (!STATE.handDetected && !CONFIG.manualMode) {
+    dom.gestureBadge.textContent = '等待手部入画';
+    dom.gestureBadge.className = 'badge';
+  } else if (STATE.tension < CONFIG.budThreshold) {
+    dom.gestureBadge.textContent = '✊ 握拳 · 花苞闭合';
+    dom.gestureBadge.className = 'badge bud';
+  } else if (STATE.tension > CONFIG.bloomThreshold) {
+    dom.gestureBadge.textContent = '🖐️ 张开 · 花朵盛放';
+    dom.gestureBadge.className = 'badge bloom';
+  } else {
+    dom.gestureBadge.textContent = '🌸 舒展 · 平滑过渡中';
+    dom.gestureBadge.className = 'badge blooming';
+  }
+}
+
+/**
+ * ============================================================================
+ * 九、 主渲染循环 (含核心缓动公式)
+ * ============================================================================
+ */
 function animate() {
   requestAnimationFrame(animate);
 
-  const delta = clock.getDelta();
   const elapsedTime = clock.getElapsedTime();
 
-  // 关键需求：缓动追随函数
-  // currentSpread += (targetSpread - currentSpread) * 0.1
-  state.currentSpread += (state.targetSpread - state.currentSpread) * CONFIG.easingFactor;
-
-  // 将绽放值传递至 GPU 着色器
-  if (flowerMaterial) {
-    flowerMaterial.uniforms.uBloom.value = state.currentSpread;
-    flowerMaterial.uniforms.uTime.value = elapsedTime;
+  // 若未检测到手部且非手动模式，让花朵缓慢回到屏幕中心并轻轻合拢为花苞
+  if (!STATE.handDetected && !CONFIG.manualMode) {
+    STATE.tension += (0.0 - STATE.tension) * 0.08;
+    STATE.targetSpread = 0.0;
+    STATE.targetCenter.set(0, 0, 0);
+    STATE.handActivity += (0.0 - STATE.handActivity) * 0.08;
+  } else {
+    STATE.handActivity += (1.0 - STATE.handActivity) * 0.15;
   }
 
-  // 更新花朵世界坐标位置与自转微动
+  // 【核心需求 5】使用指定缓动函数平滑更新绽放度
+  STATE.currentSpread += (STATE.targetSpread - STATE.currentSpread) * CONFIG.spreadEasing;
+
+  // 花朵整体 3D 位置平滑跟随手部中心
+  STATE.currentCenter.lerp(STATE.targetCenter, CONFIG.positionLerp);
+
+  // 花朵朝向随手部偏移产生轻微的 3D 视差倾斜，增强立体交互感
   if (flowerPoints) {
-    flowerPoints.position.copy(state.handPosition);
-    flowerPoints.rotation.z = state.handRotation.z * 0.4;
-
-    if (CONFIG.autoRotate) {
-      flowerPoints.rotation.y = elapsedTime * 0.35;
-      flowerPoints.rotation.x = Math.sin(elapsedTime * 0.8) * 0.1;
-    }
+    flowerPoints.rotation.y = STATE.currentCenter.x * 0.18;
+    flowerPoints.rotation.x = -STATE.currentCenter.y * 0.18;
   }
 
+  // 更新 Shader Uniforms
+  if (flowerMaterial) {
+    flowerMaterial.uniforms.uTime.value = elapsedTime;
+    flowerMaterial.uniforms.uSpread.value = STATE.currentSpread;
+    flowerMaterial.uniforms.uHandActivity.value = STATE.handActivity;
+    flowerMaterial.uniforms.uFlowerCenter.value.copy(STATE.currentCenter);
+  }
+
+  // 刷新 UI 指标面板并渲染 Three.js 场景
+  updateHUD();
   renderer.render(scene, camera);
-
-  // 渲染帧率统计 (独立于手势识别)
-  state.renderFrameCount++;
-  const now = performance.now();
-  if (now - state.lastRenderFpsTime >= 1000) {
-    state.renderFps = Math.round((state.renderFrameCount * 1000) / (now - state.lastRenderFpsTime));
-    renderFpsStatEl.textContent = state.renderFps;
-    state.renderFrameCount = 0;
-    state.lastRenderFpsTime = now;
-  }
 }
 
-// ============================================================================
-// 6. MediaPipe 与 摄像头初始化 (Camera & Vision Pipeline)
-// ============================================================================
-async function initMediaPipeHands() {
-  if (typeof window.Hands === 'undefined' || typeof window.Camera === 'undefined') {
-    showModal('组件库加载失败', '未能从 CDN 加载 MediaPipe 依赖，请检查网络连接或刷新重试。');
-    return;
-  }
-
-  try {
-    const hands = new window.Hands({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-    });
-
-    // 性能优化：modelComplexity: 0 (轻量极速模型，极大幅度解放 CPU)
-    hands.setOptions({
-      maxNumHands: 1,               // 优先追踪单只手以获得最佳性能
-      modelComplexity: 0,           // 0: 高速轻量模式
-      minDetectionConfidence: 0.5,  // 平衡置信阈值提速
-      minTrackingConfidence: 0.5
-    });
-
-    hands.onResults((results) => {
-      state.isProcessingVision = false;
-      onHandsResults(results);
-
-      // 手势识别专属帧率统计
-      state.visionFrameCount++;
-      const vNow = performance.now();
-      if (vNow - state.lastVisionFpsTime >= 1000) {
-        state.visionFps = Math.round((state.visionFrameCount * 1000) / (vNow - state.lastVisionFpsTime));
-        visionFpsStatEl.textContent = state.visionFps;
-        state.visionFrameCount = 0;
-        state.lastVisionFpsTime = vNow;
-      }
-    });
-
-    // 关键架构优化：非阻塞异步视觉派发 (Decoupled Vision Pipeline)
-    // 即使视觉计算单帧耗时 60ms (约 15 FPS)，Three.js 渲染管线依然保持 60 FPS 满帧丝滑！
-    const cameraUtils = new window.Camera(videoEl, {
-      onFrame: async () => {
-        if (state.isProcessingVision || videoEl.readyState < 2) {
-          return;
-        }
-        state.isProcessingVision = true;
-
-        try {
-          await hands.send({ image: videoEl });
-        } catch (err) {
-          console.warn('MediaPipe send warning:', err);
-        } finally {
-          state.isProcessingVision = false;
-        }
-      },
-      width: 640,
-      height: 480
-    });
-
-    await cameraUtils.start();
-    hideModal();
-
-  } catch (error) {
-    console.error('摄像头启动异常:', error);
-    showModal(
-      '无法访问摄像头',
-      '请确保已授予浏览器摄像头权限。如果使用的是 Chrome，请点击地址栏左侧的相机图标开启权限。'
-    );
-  }
-}
-
-// ============================================================================
-// 7. UI 事件绑定与交互逻辑
-// ============================================================================
-function setupUIEvents() {
-  // 控制面板折叠/展开
-  const toggleBtn = document.getElementById('toggle-panel-btn');
-  const controlPanel = document.querySelector('.control-panel');
-  toggleBtn.addEventListener('click', () => {
-    controlPanel.classList.toggle('collapsed');
-  });
-
-  // 追踪锚点切换 (食指指尖 vs 掌心)
-  const anchorBtns = document.querySelectorAll('.opt-btn');
-  anchorBtns.forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      anchorBtns.forEach((b) => b.classList.remove('active'));
-      e.target.classList.add('active');
-      CONFIG.trackingAnchor = e.target.dataset.target;
-    });
-  });
-
-  // 粒子数量性能预设切换
-  const countBtns = document.querySelectorAll('.count-btn');
-  const countStatEl = document.getElementById('particle-count-stat');
-  countBtns.forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      countBtns.forEach((b) => b.classList.remove('active'));
-      e.target.classList.add('active');
-      const count = parseInt(e.target.dataset.count, 10);
-      CONFIG.particleCount = count;
-      countStatEl.textContent = count.toLocaleString();
-      createParticleFlower();
-    });
-  });
-
-  // 主题切换
-  const themeBtns = document.querySelectorAll('.theme-btn');
-  themeBtns.forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      themeBtns.forEach((b) => b.classList.remove('active'));
-      e.target.classList.add('active');
-      CONFIG.theme = e.target.dataset.theme;
-      createParticleFlower();
-    });
-  });
-
-  // 摄像头背景不透明度滑动条 (直接控制底层 video 透明度)
-  const opacityInput = document.getElementById('video-opacity');
-  const opacityValEl = document.getElementById('video-opacity-val');
-  opacityInput.addEventListener('input', (e) => {
-    const val = parseInt(e.target.value, 10);
-    CONFIG.cameraOpacity = val / 100;
-    videoEl.style.opacity = CONFIG.cameraOpacity;
-    opacityValEl.textContent = `${val}%`;
-  });
-
-  // 骨骼显示复选框
-  const skeletonCheckbox = document.getElementById('show-skeleton');
-  skeletonCheckbox.addEventListener('change', (e) => {
-    CONFIG.showSkeleton = e.target.checked;
-    if (!CONFIG.showSkeleton) {
-      skeletonCtx.clearRect(0, 0, skeletonCanvas.width, skeletonCanvas.height);
-    }
-  });
-
-  // 自转复选框
-  const rotateCheckbox = document.getElementById('auto-rotate');
-  rotateCheckbox.addEventListener('change', (e) => {
-    CONFIG.autoRotate = e.target.checked;
-  });
-
-  // 模态弹窗重新授权按钮
-  modalActionBtn.addEventListener('click', () => {
-    initMediaPipeHands();
-  });
-}
-
-function showModal(title, msg) {
-  document.getElementById('modal-title').textContent = title;
-  document.getElementById('modal-message').textContent = msg;
-  modalContainer.classList.remove('hidden');
-}
-
-function hideModal() {
-  modalContainer.classList.add('hidden');
-}
-
-// ============================================================================
-// 8. 入口启动函数 (Bootstrap)
-// ============================================================================
+/**
+ * ============================================================================
+ * 十、 启动入口
+ * ============================================================================
+ */
 function bootstrap() {
-  resizeCanvas(skeletonCanvas);
-
-  initThree();
-  setupUIEvents();
-  initMediaPipeHands();
+  initThreeScene();
+  initUIEvents();
+  initMediaPipeAndCamera();
   animate();
 }
 
-if (document.readyState === 'loading') {
-  window.addEventListener('DOMContentLoaded', bootstrap);
-} else {
-  bootstrap();
-}
+bootstrap();
